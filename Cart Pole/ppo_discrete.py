@@ -16,12 +16,12 @@ device = torch.device(
 # --- Replay Buffer ---
 class MemoryBuffer:
     def __init__(self):
-        self.log_probs = []
         self.rewards = []
-        self.masks = []
         self.values = []
+        self.log_probs = []
         self.states = []
         self.actions = []
+        self.masks = []
         self.final_value = 0
 
     def store_memory(self, action, obs_tensor, log_prob, reward, mask, value):
