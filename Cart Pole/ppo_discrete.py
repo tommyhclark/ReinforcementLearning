@@ -18,10 +18,10 @@ class MemoryBuffer:
     def __init__(self):
         self.rewards = []
         self.values = []
-        self.log_probs = []
         self.states = []
         self.actions = []
         self.masks = []
+        self.log_probs = []
         self.final_value = 0
 
     def store_memory(self, action, obs_tensor, log_prob, reward, mask, value):
