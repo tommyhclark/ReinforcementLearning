@@ -64,7 +64,8 @@ ROCKET_WIDTH = 3.66 * SCALE_S
 ROCKET_HEIGHT = ROCKET_WIDTH / 3.7 * 47.9
 ENGINE_HEIGHT = ROCKET_WIDTH * 0.5
 ENGINE_WIDTH = ENGINE_HEIGHT * 0.7
-THRUSTER_HEIGHT = ROCKET_HEIGHT * 0.86
+THRUSTER_HEIGHT = ROCKET_HEIGHT * 0.78  # Lowered from 0.86
+FIN_HEIGHT = ROCKET_HEIGHT * 0.88
 
 # LEGS
 LEG_LENGTH = ROCKET_WIDTH * 2.2
@@ -435,15 +436,16 @@ class RocketLander(gym.Env):
         return np.array(state, dtype=np.float32), float(reward), terminated, truncated, {}
 
     def render(self, mode='human'):
-        # Colors
+        # Updated Colors for a more realistic "gassy" look
         COLOR_RED = (200, 20, 20)    
         COLOR_FIRE = (255, 160, 20)   
         COLOR_CORE = (255, 255, 220)  
-        COLOR_GAS = (200, 240, 255)   
+        # Gritty grey-blue gas with alpha support
+        COLOR_GAS = (170, 180, 190, 140) 
 
         if self.viewer is None:
             pygame.init()
-            pygame.display.set_caption("Falcon 9 - Centered Leg Alignment")
+            pygame.display.set_caption("Falcon 9 - Skinny Thrusters")
             self.viewer = pygame.display.set_mode((VIEWPORT_W, VIEWPORT_H))
             self.clock = pygame.time.Clock()
             self.stars = [(np.random.randint(0, VIEWPORT_W), np.random.randint(0, VIEWPORT_H), 
@@ -462,12 +464,12 @@ class RocketLander(gym.Env):
         def world_to_screen(point):
             return (int(point[0] * (VIEWPORT_W / W)), int(VIEWPORT_H - point[1] * (VIEWPORT_H / H)))
 
-        # --- LAYER 2: Engine Fire & Smoke ---
+        # --- LAYER 2: Engine Fire & Ground Smoke ---
         engine_world_pos = self.lander.transform * (0, 0)
         dist_to_pad = engine_world_pos[1] - self.shipheight
         
         if self.power > 0.1:
-            f_scale = self.power * np.random.uniform(0.9, 1.1)
+            f_scale = self.power * np.random.uniform(0.9, 1.1)*2
             fire_poly = [(ENGINE_WIDTH * 0.4, 0), (-ENGINE_WIDTH * 0.4, 0),
                          (-ENGINE_WIDTH * 1.2, -ENGINE_HEIGHT * 5 * f_scale),
                          (0, -ENGINE_HEIGHT * 8 * f_scale),
@@ -484,29 +486,54 @@ class RocketLander(gym.Env):
             pygame.draw.polygon(self.surf, COLOR_FIRE, get_transformed_poly(fire_poly))
             pygame.draw.polygon(self.surf, COLOR_CORE, get_transformed_poly([(v[0]*0.5, v[1]*0.6) for v in fire_poly]))
 
-            if dist_to_pad < 10.0:
-                for _ in range(int(self.power * 2)):
-                    self.ground_smoke.append({
-                        'pos': [engine_world_pos[0] + np.random.uniform(-0.8, 0.8), self.shipheight],
-                        'vel': [np.random.uniform(-5, 5) * self.power, np.random.uniform(0.1, 0.6)],
-                        'size': np.random.uniform(0.3, 1.0),
-                        'life': 0.6
-                    })
+        # --- LAYER 3: Rocket Body & Nose Thruster Puffs ---
+        # Draw Rocket Body
+        # --- LAYER 4: Rocket Body & Grid Fins ---
+        for fixture in self.lander.fixtures:
+            pygame.draw.polygon(self.surf, (240, 240, 240), [world_to_screen(self.lander.transform * v) for v in fixture.shape.vertices])
 
-        for s in self.ground_smoke[:]:
-            s['pos'][0] += s['vel'][0]
-            s['pos'][1] += s['vel'][1]
-            s['life'] -= 0.05 
-            if s['life'] <= 0:
-                self.ground_smoke.remove(s)
-                continue
-            alpha = int(s['life'] * 110)
-            radius = max(1, int(s['size'] * 4))
-            p_surf = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
-            pygame.draw.circle(p_surf, (200, 200, 200, alpha), (radius, radius), radius)
-            self.surf.blit(p_surf, (world_to_screen(s['pos'])[0]-radius, world_to_screen(s['pos'])[1]-radius))
+        # Grid Fins (Now positioned ABOVE the thrusters)
+        for i in (-1, 1):
+            fin_poly = [
+                (i * ROCKET_WIDTH * 0.4, FIN_HEIGHT + 0.4), 
+                (i * ROCKET_WIDTH * 1.2, FIN_HEIGHT + 0.4),
+                (i * ROCKET_WIDTH * 1.2, FIN_HEIGHT - 0.4), 
+                (i * ROCKET_WIDTH * 0.4, FIN_HEIGHT - 0.4)
+            ]
+            pygame.draw.polygon(self.surf, COLOR_RED, [world_to_screen(self.lander.transform * v) for v in fin_poly])
 
-        # --- LAYER 3: The Boat (foreground) ---
+        # REWRITTEN NOSE THRUSTER SECTION
+        if self.force_dir != 0:
+            puff_side = 1 if self.force_dir > 0 else -1
+            
+            # Position at the top, slightly offset from center
+            gas_port_local = (puff_side * ROCKET_WIDTH * 0.4, THRUSTER_HEIGHT)
+            
+            # Create a skinny "jet" polygon
+            # This makes a long, thin triangle/trapezoid for a more realistic pressure jet
+            jet_length = np.random.uniform(1.5, 3.0)
+            jet_width = 0.2
+            gas_poly_local = [
+                (gas_port_local[0], gas_port_local[1] + jet_width),
+                (gas_port_local[0], gas_port_local[1] - jet_width),
+                (gas_port_local[0] + puff_side * jet_length, gas_port_local[1] - jet_width * 0.5),
+                (gas_port_local[0] + puff_side * jet_length, gas_port_local[1] + jet_width * 0.5),
+            ]
+            
+            gas_poly_screen = [world_to_screen(self.lander.transform * v) for v in gas_poly_local]
+            pygame.draw.polygon(self.surf, COLOR_GAS, gas_poly_screen)
+            
+            # Add a very thin white core for high pressure
+            core_poly_local = [
+                (gas_port_local[0], gas_port_local[1] + jet_width * 0.3),
+                (gas_port_local[0] + puff_side * jet_length * 0.6, gas_port_local[1])
+            ]
+            pygame.draw.line(self.surf, (220, 220, 220, 180), 
+                             world_to_screen(self.lander.transform * core_poly_local[0]), 
+                             world_to_screen(self.lander.transform * core_poly_local[1]), 2)
+
+        # --- LAYER 4: The Boat & Legs ---
+        # (Rest of the rendering code remains the same for ship and legs...)
         for obj in self.drawlist:
             if obj == self.lander or obj in self.legs: continue
             is_pad = (obj == self.ship or obj in self.containers)
@@ -515,37 +542,16 @@ class RocketLander(gym.Env):
                 vertices = [world_to_screen(obj.transform * v) for v in fixture.shape.vertices]
                 pygame.draw.polygon(self.surf, color, vertices)
 
-        # --- LAYER 4: Rocket Body & Fins ---
-        for fixture in self.lander.fixtures:
-            pygame.draw.polygon(self.surf, (240, 240, 240), [world_to_screen(self.lander.transform * v) for v in fixture.shape.vertices])
-
-        for i in (-1, 1):
-            fin_poly = [(i * ROCKET_WIDTH * 0.4, THRUSTER_HEIGHT + 0.5), (i * ROCKET_WIDTH * 1.2, THRUSTER_HEIGHT + 0.5),
-                        (i * ROCKET_WIDTH * 1.2, THRUSTER_HEIGHT - 0.5), (i * ROCKET_WIDTH * 0.4, THRUSTER_HEIGHT - 0.5)]
-            pygame.draw.polygon(self.surf, COLOR_RED, [world_to_screen(self.lander.transform * v) for v in fin_poly])
-
-        # --- LAYER 5: Centered & Fixed Leg Sweep ---
+        # Centered & Fixed Leg Sweep
         height_pct = self.lander.position[1] / H
         deploy_factor = np.clip((0.60 - height_pct) / 0.30, 0.0, 1.0)
-
         for side in [-1, 1]:
-            # Hinge point: Exactly at the edge of the rocket body
-            # x = side * (ROCKET_WIDTH / 2)
-            # y = fixed at 0.5 units from the bottom center
-            hinge_local = (side * ROCKET_WIDTH / 2, 0.5)
+            hinge_local = (side * ROCKET_WIDTH * 0, 0.5)
             p1_world = self.lander.transform * hinge_local
-            
-            # sweep_angle: 0.0 means straight UP (folded), 2.5 means DOWN/OUT (unfolded)
             sweep_angle = 2.5 * deploy_factor
-            
-            # Math for rotation:
-            # When sweep_angle is 0: x offset is 0, y offset is LEG_LENGTH (pointing UP)
-            # As angle increases: x offset swings out, y offset moves DOWN
             foot_rel_x = side * np.sin(sweep_angle) * LEG_LENGTH
             foot_rel_y = np.cos(sweep_angle) * LEG_LENGTH
-            
             p2_world = self.lander.transform * (hinge_local[0] + foot_rel_x, hinge_local[1] + foot_rel_y)
-            
             pygame.draw.line(self.surf, COLOR_RED, world_to_screen(p1_world), world_to_screen(p2_world), 6)
 
         self.viewer.blit(self.surf, (0, 0))
@@ -565,24 +571,35 @@ def test_thrust_dynamics():
     env = RocketLander()
     env.reset()
     
-    print("Testing sequence: Legs deploy at H/2. Smoke triggers at bottom.")
-    for i in range(1000):
-        # 1. Slow descent from 90% height to 5% height
-        # Total distance is H * 0.85. Over 1000 frames, that's H*0.85/1000 per frame.
-        y_pos = max(env.shipheight + 1, H * 0.9 - (i * (H * 0.85 / 800)))
-        
+    print("Testing: Gimbal sweep, Throttle pulsing, and Side Thruster firing.")
+    
+    # We'll use a sine wave to make the movements smooth and visible
+    for i in range(1200):
+        # 1. Maintain a hovering height to watch the effects
+        y_pos = H * 0.4 
         env.lander.position = (W / 2, y_pos)
-        env.lander.linearVelocity = (0, -1) 
-        env.lander.angle = 0
-        env.game_over = False # Force physics to stay active
+        env.lander.angle = 0  # Keep rocket vertical to see plume gimbal clearly
+        env.lander.linearVelocity = (0, 0)
+        env.game_over = False 
+
+        # 2. Dynamic Controls using math.sin
+        # Gimbal: Swings left and right
+        gimbal_input = np.sin(i * 0.05) 
         
-        # 2. Throttle logic: 
-        # Low throttle during descent, High throttle near the "touchdown"
-        dist = y_pos - env.shipheight
-        test_throttle = 1.0 if dist < 10 else 0.2
+        # Throttle: Pulses between 0.2 and 1.0 to see plume grow/shrink
+        throttle_input = 0.6 + 0.4 * np.sin(i * 0.1)
         
-        # 3. Step and Render
-        env.step([0, test_throttle, 0])
+        # Side Thrusters: Fire left for 50 frames, then right for 50 frames
+        # In your code, action[2] > 0.5 is one way, < -0.5 is the other
+        thruster_input = 0
+        if (i // 50) % 3 == 1:
+            thruster_input = 1.0  # Fire Right
+        elif (i // 50) % 3 == 2:
+            thruster_input = -1.0 # Fire Left
+
+        # 3. Step with the dynamic actions
+        # Action format: [gimbal, throttle, side_thruster]
+        env.step([gimbal_input, throttle_input, thruster_input])
         env.render()
         
         for event in pygame.event.get():
