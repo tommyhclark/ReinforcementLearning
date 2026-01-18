@@ -52,7 +52,7 @@ SCALE_S = 0.35  # Temporal Scaling, lower is faster - adjust forces appropriatel
 INITIAL_RANDOM = 0.4  # Random scaling of initial velocity, higher is more difficult
 
 START_HEIGHT = 1000.0
-START_SPEED = 80.0
+START_SPEED = 30 # 80.0
 
 # ROCKET
 MIN_THROTTLE = 0.4
@@ -121,11 +121,11 @@ class ContactDetector(contactListener):
 
 class RocketLander(gym.Env):
     metadata = {
-        'render.modes': ['human', 'rgb_array'],
-        'video.frames_per_second': FPS
+        "render_modes": ["human", "rgb_array"],
+        "render_fps": FPS,
     }
 
-    def __init__(self):
+    def __init__(self, render_mode=None):
         self._seed()
         self.viewer = None
         self.episode_number = 0
@@ -136,6 +136,9 @@ class RocketLander(gym.Env):
         self.engine = None
         self.ship = None
         self.legs = []
+        self.render_mode = render_mode
+        self.viewer = None
+        self.clock = None
 
         high = np.array([1, 1, 1, 1, 1, 1, 1, np.inf, np.inf, np.inf], dtype=np.float32)
         low = -high
@@ -320,7 +323,9 @@ class RocketLander(gym.Env):
         if CONTINUOUS:
             np.clip(action, -1, 1)
             self.gimbal += action[0] * 0.15 / FPS
-            self.throttle += action[1] * 0.5 / FPS
+            # self.throttle += action[1] * 0.5 / FPS # Removed for imrpoved trainign
+            throttle_cmd = np.clip((action[1] + 1) / 2, 0, 1)
+            self.throttle = throttle_cmd
             if action[2] > 0.5:
                 self.force_dir = 1
             elif action[2] < -0.5:
@@ -384,45 +389,88 @@ class RocketLander(gym.Env):
 
         # REWARD -------------------------------------------------------------------------------------------------------
 
-        # state variables for reward
-        distance = np.linalg.norm((3 * x_distance, y_distance))  # weight x position more
-        speed = np.linalg.norm(vel_l)
-        groundcontact = self.legs[0].ground_contact or self.legs[1].ground_contact
-        brokenleg = (self.legs[0].joint.angle < 0 or self.legs[1].joint.angle > -0) and groundcontact
-        outside = abs(pos.x - W / 2) > W / 2 or pos.y > H
-        fuelcost = 0.1 * (0 * self.power + abs(self.force_dir)) / FPS
-        landed = self.legs[0].ground_contact and self.legs[1].ground_contact and speed < 0.1
+        # --- REWARD SHAPING ---
+
+        # State variables
+        x, y = pos.x, pos.y
+        vx, vy = vel_l[0], vel_l[1]
+        angle_vel = vel_a
+        angle_abs = abs(angle)
+        ground_contact = self.legs[0].ground_contact or self.legs[1].ground_contact
+        fuel_usage = 0.1 * (self.power + abs(self.force_dir)+self.gimbal) / FPS
+
         done = False
+        reward = 0.0
 
-        reward = -fuelcost
+        # --- Penalize being outside lateral or vertical bounds ---
+        if abs(x - W/2) < W/8:
+            reward += 1
 
-        if outside or brokenleg:
-            self.game_over = True
+        if abs(x - W/2) > W/2 or y>H:
+            reward -= 10.0
+            done = True
+
+        # --- Penalize rocket crashes or broken legs ---
+        broken_leg = (self.legs[0].joint.angle < 0 or self.legs[1].joint.angle > -0) and ground_contact
+        if broken_leg:
+            reward -= 1.0
+            done = True
+
+        # --- Penalize fuel consumption ---
+        # reward -= fuel_usage
+
+        reward -= abs(angle_vel)
+        reward -= angle_abs
+        reward += 0.005*(H-y)
+        reward -= fuel_usage
+
+        # # --- Reward for being closer to the ground safely ---
+        # reward += 0.01 * (H - y)  # encourages descending
+
+        # # --- Penalize fast horizontal speed ---
+        # reward -= 0.1 * abs(vx)
+
+        # # --- Penalize positive upward velocity ---
+        # if vy > 0:
+        #     reward -= 0.1 * vy
+
+        # # --- Penalize fast downward speed near the ground ---
+        # if y < H * 0.2:  # near the ground
+        #     reward -= 2 * abs(vy)
+
+        # --- Penalize large angle and angular velocity near the ground ---
+        if y < H * 0.5:
+            reward -= 0.2 * angle_abs
+            reward -= 0.1 * abs(angle_vel)
+
+        # --- Reward for stable leg contact ---
+        landed = (
+                self.legs[0].ground_contact and 
+                self.legs[1].ground_contact and 
+                abs(vx) < 0.1 and 
+                abs(vy) < 0.1 and 
+                abs(angle) < 0.1  # upright
+            )
+        if landed:
+            self.landed_ticks += 1
+        else:
+            self.landed_ticks = 0
+
+        # --- Landing bonus ---
+        if self.landed_ticks >= FPS:
+            reward += 1.0
+            done = True
+
+        # --- Small survival reward ---
+        reward += 0.01  # encourages staying alive
+
+        # --- Clip to stable range for PPO ---
+        reward = np.clip(reward, -1.0, 1.0)
 
         if self.game_over:
             done = True
-        else:
-            # reward shaping
-            shaping = -0.5 * (distance + speed + abs(angle) ** 2)
-            shaping += 0.1 * (self.legs[0].ground_contact + self.legs[1].ground_contact)
-            if self.prev_shaping is not None:
-                reward += shaping - self.prev_shaping
-            self.prev_shaping = shaping
 
-            if landed:
-                self.landed_ticks += 1
-            else:
-                self.landed_ticks = 0
-            if self.landed_ticks == FPS:
-                reward = 1.0
-                done = True
 
-        if done:
-            reward += max(-1, 0 - 2 * (speed + distance + abs(angle) + abs(vel_a)))
-        elif not groundcontact:
-            reward -= 0.25 / FPS
-
-        reward = np.clip(reward, -1, 1)
 
         # REWARD -------------------------------------------------------------------------------------------------------
 
@@ -436,6 +484,8 @@ class RocketLander(gym.Env):
         return np.array(state, dtype=np.float32), float(reward), terminated, truncated, {}
 
     def render(self, mode='human'):
+        if self.render_mode is None:
+            return
         # Updated Colors for a more realistic "gassy" look
         COLOR_RED = (200, 20, 20)    
         COLOR_FIRE = (255, 160, 20)   
@@ -444,8 +494,11 @@ class RocketLander(gym.Env):
         COLOR_GAS = (170, 180, 190, 140) 
 
         if self.viewer is None:
+            if self.render_mode != "human":
+                return
+
             pygame.init()
-            pygame.display.set_caption("Falcon 9 - Skinny Thrusters")
+            pygame.display.set_caption("Falcon 9 Landing")
             self.viewer = pygame.display.set_mode((VIEWPORT_W, VIEWPORT_H))
             self.clock = pygame.time.Clock()
             self.stars = [(np.random.randint(0, VIEWPORT_W), np.random.randint(0, VIEWPORT_H), 
@@ -561,7 +614,6 @@ class RocketLander(gym.Env):
 
     def close(self):
         if self.viewer is not None:
-            import pygame
             pygame.display.quit()
             pygame.quit()
             self.viewer = None
