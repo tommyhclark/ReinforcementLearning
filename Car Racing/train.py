@@ -6,6 +6,7 @@ import numpy as np
 from typing import Any, Dict, Tuple, Union
 from stable_baselines3 import PPO
 from stable_baselines3.common.logger import HumanOutputFormat, KVWriter, Logger
+import subprocess
 
 # --- MLFLOW LOGGING INFRASTRUCTURE ---
 class MLflowOutputFormat(KVWriter):
@@ -19,6 +20,13 @@ class MLflowOutputFormat(KVWriter):
             if isinstance(value, np.ScalarType) and not isinstance(value, str):
                 mlflow.log_metric(key, value, step=step)
 
+def get_git_revision_hash():
+    try:
+        # Gets the short 7-character commit hash
+        return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+    except:
+        return "no-git"
+
 # --- MAIN TRAINING LOOP ---
 def train():
     device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -27,6 +35,10 @@ def train():
     mlflow.set_experiment("CarRacing_Expert_Path")
     
     with mlflow.start_run(run_name="PPO_Baseline_SB3"):
+        mlflow.log_artifact(__file__)
+        git_hash = get_git_revision_hash()
+        mlflow.set_tag("git_commit", git_hash)
+
         # Log Hyperparameters
         params = {"learning_rate": 1e-4, "n_steps": 5096, "batch_size": 64}
         mlflow.log_params(params)
