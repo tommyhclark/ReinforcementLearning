@@ -7,6 +7,7 @@ from typing import Any, Dict, Tuple, Union
 from stable_baselines3 import PPO
 from stable_baselines3.common.logger import HumanOutputFormat, KVWriter, Logger
 import subprocess
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 # --- MLFLOW LOGGING INFRASTRUCTURE ---
 class MLflowOutputFormat(KVWriter):
@@ -56,9 +57,16 @@ def train():
         model = PPO("CnnPolicy", env, verbose=1, device=device, **params)
         model.set_logger(loggers)
 
+        # Save a checkpoint every 10,000 steps
+        checkpoint_callback = CheckpointCallback(
+            save_freq=10000,
+            save_path="./logs/",
+            name_prefix="rl_model"
+        )
+
         # 4. Train
         print(f"🚀 Training on {device}. Check MLflow UI for progress.")
-        model.learn(total_timesteps=1e6)
+        model.learn(total_timesteps=3e5, callback=checkpoint_callback)
 
         # 5. Save Artifacts
         model.save("ppo_car_racer")
