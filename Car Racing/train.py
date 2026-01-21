@@ -3,75 +3,93 @@ import gymnasium as gym
 import torch
 import mlflow
 import numpy as np
-from typing import Any, Dict, Tuple, Union
+from typing import Callable
 from stable_baselines3 import PPO
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import VecFrameStack
+from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold
 from stable_baselines3.common.logger import HumanOutputFormat, KVWriter, Logger
-import subprocess
-from stable_baselines3.common.callbacks import CheckpointCallback
 
-# --- MLFLOW LOGGING INFRASTRUCTURE ---
+# --- SCHEDULER ---
+def linear_schedule(initial_value: float) -> Callable[[float], float]:
+    """
+    Linear learning rate schedule.
+    :param initial_value: Initial learning rate.
+    :return: schedule that computes current learning rate depending on remaining progress
+    """
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+    return func
+
+# --- MLFLOW LOGGER (Unchanged) ---
 class MLflowOutputFormat(KVWriter):
-    """
-    Custom Logger: Intercepts SB3 internal metrics and sends them to MLflow.
-    """
-    def write(self, key_values: Dict[str, Any], key_excluded: Dict[str, Union[str, Tuple[str, ...]]], step: int = 0) -> None:
+    def write(self, key_values: dict, key_excluded: dict, step: int = 0) -> None:
         for (key, value), (_, excluded) in zip(sorted(key_values.items()), sorted(key_excluded.items())):
             if excluded is not None and "mlflow" in excluded:
                 continue
             if isinstance(value, np.ScalarType) and not isinstance(value, str):
                 mlflow.log_metric(key, value, step=step)
 
-def get_git_revision_hash():
-    try:
-        # Gets the short 7-character commit hash
-        return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
-    except:
-        return "no-git"
-
-# --- MAIN TRAINING LOOP ---
 def train():
     device = "mps" if torch.backends.mps.is_available() else "cpu"
+    mlflow.set_experiment("CarRacing_Optimized")
     
-    # 1. Start MLflow Experiment
-    mlflow.set_experiment("CarRacing_Expert_Path")
-    
-    with mlflow.start_run(run_name="PPO_Baseline_SB3"):
-        mlflow.log_artifact(__file__)
-        git_hash = get_git_revision_hash()
-        mlflow.set_tag("git_commit", git_hash)
+    with mlflow.start_run(run_name="PPO_VecEnv_Scheduled"):
+        # 1. Hyperparameters
+        total_timesteps = 1_000_000
+        params = {
+            "n_steps": 2048,
+            "batch_size": 128,
+            "gamma": 0.99,
+            "learning_rate": linear_schedule(3e-4), # Lowering LR over time
+            "ent_coef": 0.01,                       # Keeps exploration alive
+            "clip_range": 0.2,
+            "n_epochs": 10,
+        }
+        mlflow.log_params({"lr_init": 3e-4, "total_timesteps": total_timesteps, **params})
 
-        # Log Hyperparameters
-        params = {"learning_rate": 1e-4, "n_steps": 5096, "batch_size": 64}
-        mlflow.log_params(params)
-
-        # 2. Setup Environment & Logger
-        env = gym.make("CarRacing-v3", render_mode="rgb_array")
+        # 2. Setup Vectorized Environment
+        # We use 4 parallel environments for faster data collection
+        # GrayScale observation reduces complexity
+        env = make_vec_env(
+            "CarRacing-v3", 
+            n_envs=4, 
+            wrapper_class=gym.wrappers.GrayScaleObservation,
+            wrapper_kwargs={"keep_dim": True}
+        )
         
-        # We tell SB3 to log to BOTH the terminal (HumanOutput) and MLflow
+        # Stack 4 frames so the model sees motion
+        env = VecFrameStack(env, n_stack=4)
+
+        # 3. Callbacks for Early Stopping
+        # This will stop training if the agent hits a mean reward of 900
+        stop_callback = StopTrainingOnRewardThreshold(reward_threshold=900, verbose=1)
+        eval_callback = EvalCallback(
+            env, 
+            callback_on_new_best=stop_callback,
+            eval_freq=10000, 
+            best_model_save_path="./logs/best_model",
+            verbose=1
+        )
+
+        # 4. Logger Setup
         loggers = Logger(
-            folder=None, 
+            folder=None,
             output_formats=[HumanOutputFormat(sys.stdout), MLflowOutputFormat()]
         )
 
-        # 3. Initialize Model
+        # 5. Model
         model = PPO("CnnPolicy", env, verbose=1, device=device, **params)
         model.set_logger(loggers)
 
-        # Save a checkpoint every 10,000 steps
-        checkpoint_callback = CheckpointCallback(
-            save_freq=10000,
-            save_path="./logs/",
-            name_prefix="rl_model"
-        )
+        # 6. Train
+        print(f"🚀 Training with FrameStack and Linear Scheduler on {device}...")
+        model.learn(total_timesteps=total_timesteps, callback=eval_callback)
 
-        # 4. Train
-        print(f"🚀 Training on {device}. Check MLflow UI for progress.")
-        model.learn(total_timesteps=3e5, callback=checkpoint_callback)
-
-        # 5. Save Artifacts
-        model.save("ppo_car_racer")
-        mlflow.log_artifact("ppo_car_racer.zip")
-        print("✅ Training complete and model logged to MLflow.")
+        # 7. Save
+        model.save("ppo_car_racer_optimized")
+        mlflow.log_artifact("ppo_car_racer_optimized.zip")
+        print("✅ Training complete.")
 
 if __name__ == "__main__":
     train()
